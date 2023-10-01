@@ -1,0 +1,67 @@
+ARG baseImg="ubuntu"
+
+FROM ${baseImg}
+
+ARG packages="firefox"
+ARG basePackages="nano sudo openssl curl wget git dbus-x11 xinit openssh-server net-tools iputils-ping tigervnc-standalone-server tigervnc-tools locales python3 python3-pip python3-dev python3-numpy gcc g++ make build-essential"
+ARG desktop="xfce"
+ARG username="username"
+ARG password="password"
+ARG timezone="Etc/UTC"
+ARG VNC_DISPLAY=0
+ARG memory=4096
+
+# Install packages
+RUN apt-get update -q --fix-missing && \
+    apt-get -y upgrade && \
+    apt-get install --no-install-recommends -y ${basePackages} ${packages} && \
+    apt-get clean && \
+    apt-get autoremove
+
+# Setup Startup Script
+RUN echo "#!/bin/bash" > /startlinux.sh
+RUN echo "/etc/init.d/ssh start" >> /startlinux.sh
+RUN chmod 755 /startlinux.sh
+
+# Setup DE
+RUN if [ "${desktop}" = "xfce" ] ; then apt-get -y install --no-install-recommends xfce4 xfce4-goodies; fi
+RUN if [ "${desktop}" = "mate" ] ; then apt-get -y install --no-install-recommends mate-desktop-environment ; fi
+RUN if [ "${desktop}" = "kde" ] ; then apt-get -y install --no-install-recommends kde-plasma-desktop ; fi
+
+# Create and Modify username
+RUN groupadd -g 1000 ${username} && \
+    useradd -m -u 1000 -g 1000 -G ${username} -s /bin/bash ${username} && \
+    echo "${username}:${password}" | chpasswd && \
+    echo "${username}    ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+# Generate SSL Certificats
+RUN mkdir /certs && cd /certs && \
+    openssl genrsa -des3 -passout pass:AlphaDES2048 -out vnc.pass.key 2048 && \
+    openssl rsa -passin pass:AlphaDES2048 -in vnc.pass.key -out key.pem && \
+    rm vnc.pass.key && \
+    openssl req -new -key key.pem -out vncserver.csr \
+        -subj "/C=IN/ST=UttarPradesh/L=Noida/O=DevEnv/OU=IT Department/CN=container.local" && \
+    openssl x509 -req -days 9999 -in vncserver.csr -signkey key.pem -out cert.pem && \
+    chown -R ${username}:${username} /certs
+
+# Setup VNC
+RUN git clone https://github.com/novnc/websockify.git /opt/websockify && cd /opt/websockify && make && python3 setup.py install && cd /; \
+    echo "/usr/libexec/tigervncsession-start :${VNC_DISPLAY} " >> /startlinux.sh ; \
+    echo "echo -e '${password}' | vncpasswd -f >/home/${username}/.vnc/passwd" >> /startlinux.sh  ;\
+    echo "/opt/websockify/run -D 8003 localhost:5900" >> /startlinux.sh ; \
+    echo "while true; do sudo -u ${username} vncserver -fg -v ; done" >> /startlinux.sh ; \
+    echo ":${VNC_DISPLAY}=${username}" >>/etc/tigervnc/vncserver.users ;\
+    echo '$localhost = "no";' >>/etc/tigervnc/vncserver-config-mandatory ;\
+    echo '$SecurityTypes = "VncAuth,VeNCrypt,TLSVnc";' >>/etc/tigervnc/vncserver-config-mandatory ;\
+    echo '$X509Cert = "/certs/cert.pem";' >>/etc/tigervnc/vncserver-config-mandatory ;\
+    echo '$X509Key = "/certs/key.pem";' >>/etc/tigervnc/vncserver-config-mandatory ;\
+    mkdir -p /home/${username}/.vnc ;\
+    chown ${username}:${username} /home/${username}/.vnc ;\
+    touch /home/${username}/.vnc/passwd ;\
+    chown ${username}:${username} /home/${username}/.vnc/passwd ;\
+    chmod 600 /home/${username}/.vnc/passwd ; 
+
+RUN chown -R ${username}:${username} /home/${username}
+EXPOSE 22 5900 8003
+ENTRYPOINT [ "/bin/bash" ]
+CMD [ "/startlinux.sh" ]
